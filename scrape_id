@@ -1,0 +1,244 @@
+# requirements.txt:
+
+# Function dependencies, for example:
+# package>=version
+pandas
+numpy
+google-cloud-storage
+google-cloud-bigquery
+beautifulsoup4
+pytz
+lxml
+
+# scrape_id.py (Entry point get_job_html)
+
+import requests # no 
+import json # no 
+import gzip # no 
+import pandas as pd #maybe 
+import numpy as np #maybe 
+from google.cloud import storage #Yes 
+from google.cloud import bigquery #Yes 
+from datetime import datetime #no 
+from bs4 import BeautifulSoup #Yes 
+import pytz #maybe 
+import lxml #maybe
+import string #No 
+
+def get_chile_time():
+  tz = pytz.timezone('America/Santiago')
+  now = datetime.now(tz=tz)
+  return now 
+
+def json_to_dataframe(j):
+  cols =[]
+  data = []
+  for dic in j:
+    if type(j[dic]) != dict:
+      cols.append(str(dic))
+      data.append(str(j[dic]))
+    else:
+      for sub_dic in j[dic]:
+        if type(j[dic][sub_dic]) != dict:
+          cols.append(str(dic)+"_"+str(sub_dic))
+          data.append(str(j[dic][sub_dic]))
+        else:
+          for sub_sub_dic in j[dic][sub_dic]:
+            cols.append(str(dic)+"_"+str(sub_dic)+"_"+str(sub_sub_dic))
+            data.append(str(j[dic][sub_dic][sub_sub_dic]))
+  df = pd.DataFrame(columns=cols, data = [data])
+  return df
+
+def extract_datalayer_from_html(soup, return_as_dataframe = True):
+  #[0] subsituted to [1] in line below
+  dta = json.loads(soup.findAll('script', attrs = {'type':"application/ld+json"})[1].text, strict = False)
+  if return_as_dataframe:
+    dta = json_to_dataframe(dta)
+  return dta
+
+def get_table_data(soup, return_as_dataframe = True):
+  matrix = [i.text.strip().split('\n',1) for i in soup.findAll('table')[0].findAll('tr')]
+  matrix = [[j.strip().replace('\n', ' ').replace('\t', ' ') for j in row] for row in matrix]
+  if return_as_dataframe:
+    json_table= json_to_dataframe(dict(matrix))
+    json_table.columns = [i.replace('ID', 'job_id') for i in json_table.columns]
+  else:
+    json_table= str(dict(matrix))
+  return json_table
+
+def get_benefit_data(soup):
+  dta_title = " ---- ".join([x.text.strip() for x in soup.findAll('div', attrs={'class':'beneficio-title'})])
+  dta_desc = " ---- ".join([x.text.strip() for x in soup.findAll('div', attrs={'class':'beneficio-desc'})])
+  return pd.DataFrame({"Beneficio_Title" : [dta_title], "Beneficio_Desc" : [dta_desc]})
+
+def get_app_count_from_html(soup):
+  view_count, app_count = [x.text for x in soup.findAll('div', attrs={'class':'text-right'})[0].findAll("b")[0:2]]
+  return view_count, app_count
+
+def check_oferta_destacada(soup):
+  destacada = 'oferta destacada' in [i.text.lower() for i in soup.findAll('small')]
+  return int(destacada)
+
+def check_if_job_expired(html):
+  expired = 'anuncio ha expirado o ha sido desactivado' in html.lower()
+  return int(expired)
+
+def remove_chars(s):
+  s = ''.join([char for char in s if char not in string.punctuation])
+  return s
+
+def remove_accents(s):
+  s = s.replace('á', 'a').replace('é', 'e').replace('í', 'i').replace('ó', 'o').replace('ú', 'u').replace('ñ', 'n')
+  return s
+
+def clean_cols(df_to_clean):
+  df_to_clean.columns = [remove_chars(remove_accents(i)) for i in df_to_clean.columns]
+  return df_to_clean
+
+
+def parse_from_html(content, job_id,  time_stamp):
+  #Hong, you are to provide the JobID and Time Stamp in ChileTime as funtion inputs #
+  #Make Sure that it is the same exact Time Stamp as the one included in the name of HTML File ##
+  
+  # Get Soup  Object
+  soup = BeautifulSoup(content, 'lxml')
+  
+  # Check if Oferta Destacada
+  oferta_destacada = check_oferta_destacada(soup)
+  
+  # Check if Job Expired 
+  expired = check_if_job_expired(content)
+  
+  # Get view and application count 
+  view_count, app_count = get_app_count_from_html(soup)
+  
+  # Extract Data Layer: This is where most of the job content is
+  df_datalayer= extract_datalayer_from_html(soup)
+  
+  # Set these Parameters in DataFrame 
+  df_datalayer['job_id'] = str(job_id)
+  df_datalayer['time_stamp'] = time_stamp
+  df_datalayer['app_count'] = app_count
+  df_datalayer['view_count'] = view_count
+  df_datalayer['expired'] = int(expired)
+  df_datalayer['oferta_destacada'] = oferta_destacada
+  
+  # This extracts data From the Table in the Job Positing
+  df_table = get_table_data(soup=soup)
+  
+  # Sam added this portion of the code, it is to get benefit data
+  df_benefit = get_benefit_data(soup)
+  
+  #Now we concatenate these three dfs together, but first we must make sure there are no shared column names:
+  df_table = df_table[[c for c in df_table.columns if (c not in df_datalayer.columns) and (c not in df_benefit.columns) ]]
+  df_benefit = df_benefit[[c for c in df_benefit.columns if (c not in df_datalayer.columns)]]
+  
+  #Now Ready to Concatenate
+  df = pd.concat([df_datalayer, df_table, df_benefit], axis=1)
+  
+  #Clean Column names
+  df = clean_cols(df)
+  
+  
+  
+  col_order=['jobid', 'context', 'type', 'baseSalarytype', 'baseSalarycurrency',
+      'baseSalaryvaluetype', 'baseSalaryvalueValue',
+      'baseSalaryvalueunitText', 'datePosted', 'hiringOrganizationtype',
+      'hiringOrganizationname', 'hiringOrganizationlogo', 'industry',
+      'jobLocationtype', 'jobLocationaddresstype',
+      'jobLocationaddressaddressLocality', 'jobLocationaddressaddressRegion',
+      'jobLocationaddressaddressCountry', 'jobLocationaddresspostalCode',
+      'employmentType', 'title', 'description', 'validThrough', 'timestamp',
+      'appcount', 'viewcount', 'ofertadestacada', 'BeneficioTitle',
+      'BeneficioDesc', 'expired', 'Buscado', 'Fecha', 'Ubicacion',
+      'Categoria', 'Duracion', 'Tipo', 'Salario', 'Email']
+  
+  #If didnt collect data on a variable, add a column with null value
+  no_data_columns = [col for col in col_order if col not in df.columns]
+  
+  if len(no_data_columns)>0:
+    for c in no_data_columns:
+      df[c] = np.nan
+
+  for c in df.columns: 
+    df[c] = df[c].apply(str)
+
+  df=df[col_order]  
+  
+  return df
+
+
+def stream_df_rows_to_bq(df, table_name):
+  #This Costs Money
+  #df is Pandas DataFrame#
+  #Assumes table is already created#
+  
+  bqclient = bigquery.Client()
+
+  data_dict = df.to_dict(orient = 'records')
+  result = bqclient.insert_rows_json(table_name, data_dict) 
+  
+  if result == []:
+    print("Added data to: " + table_name)
+  else:
+    print("Something went wrong: {}".format(result))
+    raise
+
+def get_job_html(event, context):
+
+  # get the job id
+  job_id = str(event['name'].split('.')[0])
+  print('Job ID: '+ job_id)
+
+  # get job html file
+  url = 'https://www.chiletrabajos.cl/trabajo/' + job_id
+  client = storage.Client()
+
+  # check if the job page is valid
+  try:
+    r = requests.get(url, headers = {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'})
+    status = r.status_code
+    
+    if status == 200:
+      pass
+    
+    elif status == 404: 
+      raise Exception("Webpage not Found: job blacklisted")
+   
+    else: 
+      bucket = client.get_bucket('html_status_codes') #### WS
+      blob = bucket.blob(str(status)+'.txt')
+      blob.upload_from_string(" ", content_type='text/plain')
+      pass
+    
+  except:
+    bucket = client.get_bucket('black_listed_ids') #### We May Change THIS
+    blob = bucket.blob(job_id+'.txt')
+    blob.upload_from_string(" ", content_type='text/plain')
+    raise Exception("Unknown exception: job blacklisted")
+
+  job_html = r.text
+  date = get_chile_time().strftime('%Y-%m-%dT%H-%M')
+
+  # upload file
+  file_name = job_id+ '_' + date + '.txt.gz'
+  bucket = client.get_bucket('job-htmls-compressed')
+  blob = bucket.blob(file_name)
+  blob.upload_from_string(
+    gzip.compress(bytes(job_html, 'utf-8')),
+    content_type='text/plain'
+  )
+  # check if job has expired or deactivated
+  
+  if check_if_job_expired(job_html)==1:
+    bucket = client.get_bucket('black_listed_ids') # We may change this
+    blob = bucket.blob(job_id+'.txt')
+    blob.upload_from_string(" ",
+      content_type='text/plain'
+    )
+
+  #Parse 
+  df = parse_from_html(job_html, job_id, date)
+
+  #upload to Big Query
+  stream_df_rows_to_bq(df = df , table_name = 'html_data.parsed')
