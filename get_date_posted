@@ -1,0 +1,26 @@
+# requirements.txt
+
+# Function dependencies, for example:
+# package>=version
+beautifulsoup4
+lxml
+
+# get_date_posted (Entry point: get_date_posted)
+
+import requests
+from bs4 import BeautifulSoup
+import lxml
+import json 
+
+def get_date_posted(request):
+    request_json = request.get_json()
+    job_id = str(request_json['job_id'])
+
+    url = 'https://www.chiletrabajos.cl/trabajo/' +job_id
+    r = requests.get(url, headers = {'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'})
+    soup = BeautifulSoup(r.text, 'lxml')
+    j = json.loads([i.text for i in soup.find_all('script', attrs = {"type":"application/ld+json"}) if 'datePosted' in i.text][0], strict = False)
+    date_posted = j['datePosted']
+
+    return date_posted
+
